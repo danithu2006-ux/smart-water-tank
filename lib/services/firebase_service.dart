@@ -120,6 +120,10 @@ class FirebaseService extends ChangeNotifier {
     return cleaned.isNotEmpty && emailRegex.hasMatch(cleaned);
   }
 
+  // In-memory baseline storage (not persisted in DB, as per developer prompt)
+  double _lastOpenedFilling = 0.0;
+  double _lastOpenedUsage = 0.0;
+
   /// A Stream that polls the Firebase REST API every 2 seconds for tank status.
   /// Uses HTTP GET instead of WebSocket (which is blocked on some networks).
   Stream<Map<String, dynamic>> get tankStatusStream {
@@ -142,15 +146,37 @@ class FirebaseService extends ChangeNotifier {
             ? json.decode(sensorResponse.body)
             : {};
 
+        final double currentIntake =
+            (sensorData['intakeFlow'] ?? 0.0).toDouble();
+        final double currentOutput =
+            (sensorData['dailyUsage'] ?? 0.0).toDouble();
+        final bool isFilling = deviceData['is_filling'] == true;
+        final bool isWasting = deviceData['is_wasting'] == true;
+
+        final double baseLevel =
+            (deviceData['base_tank_level'] ?? deviceData['current_level_liters'] ?? 0.0)
+                .toDouble();
+
+        double liveLevel = baseLevel;
+
+        if (isFilling) {
+          final double sessionIntake = currentIntake - _lastOpenedFilling;
+          liveLevel = baseLevel + (sessionIntake > 0 ? sessionIntake : 0.0);
+        } else if (isWasting) {
+          final double sessionOutput = currentOutput - _lastOpenedUsage;
+          liveLevel = baseLevel - (sessionOutput > 0 ? sessionOutput : 0.0);
+        } else {
+          liveLevel = baseLevel;
+        }
+
+        if (liveLevel < 0) liveLevel = 0.0;
+
         return {
-          // Map dailyUsage from Arduino sensor directly to current_level_liters
-          'current_level_liters':
-              sensorData['dailyUsage'] ??
-              deviceData['current_level_liters'] ??
-              0,
-          'intakeFlow': sensorData['intakeFlow'] ?? 0.0,
-          'is_filling': deviceData['is_filling'] == true,
-          'is_wasting': deviceData['is_wasting'] == true,
+          'current_level_liters': liveLevel,
+          'intakeFlow': currentIntake,
+          'dailyUsage': currentOutput,
+          'is_filling': isFilling,
+          'is_wasting': isWasting,
           'filling_valve': deviceData['filling_valve'] == true,
           'outgoing_valve': deviceData['outgoing_valve'] == true,
         };
@@ -158,8 +184,9 @@ class FirebaseService extends ChangeNotifier {
         debugPrint('REST poll error: $e');
       }
       return {
-        'current_level_liters': 0,
+        'current_level_liters': 0.0,
         'intakeFlow': 0.0,
+        'dailyUsage': 0.0,
         'is_filling': false,
         'is_wasting': false,
         'filling_valve': false,
@@ -184,7 +211,7 @@ class FirebaseService extends ChangeNotifier {
                   'timestamp': DateTime.fromMillisecondsSinceEpoch(
                     item['timestamp'] ?? 0,
                   ),
-                  'liters_filled': item['liters_filled'] ?? 0.0,
+                  'liters_filled': (item['liters_filled'] ?? 0.0).toDouble(),
                 };
               }).toList()
               ..sort((a, b) => b['timestamp'].compareTo(a['timestamp']));
@@ -213,7 +240,7 @@ class FirebaseService extends ChangeNotifier {
                   'timestamp': DateTime.fromMillisecondsSinceEpoch(
                     item['timestamp'] ?? 0,
                   ),
-                  'liters_wasted': item['liters_wasted'] ?? 0.0,
+                  'liters_wasted': (item['liters_wasted'] ?? 0.0).toDouble(),
                 };
               }).toList()
               ..sort((a, b) => b['timestamp'].compareTo(a['timestamp']));
@@ -369,32 +396,173 @@ class FirebaseService extends ChangeNotifier {
   Future<void> toggleValve(String key, bool value) async {
     debugPrint('Attempting to toggle valve via REST: $key to $value');
     try {
-      // Build update payloads
       final uiUpdates = <String, dynamic>{};
       final arduinoUpdates = <String, dynamic>{};
 
       if (key == 'filling_valve') {
-        uiUpdates['filling_valve'] = value;
-        uiUpdates['is_filling'] = value;
-        arduinoUpdates['input'] = value;
         if (value) {
+          // Turning Inlet Valve ON:
+          // PATCH device_control: { filling_valve: true, is_filling: true, outgoing_valve: false, is_wasting: false }
+          // PATCH valveControl: { input: true, output: false }
+          uiUpdates['filling_valve'] = true;
+          uiUpdates['is_filling'] = true;
           uiUpdates['outgoing_valve'] = false;
           uiUpdates['is_wasting'] = false;
+          arduinoUpdates['input'] = true;
           arduinoUpdates['output'] = false;
-        }
-      } else if (key == 'outgoing_valve') {
-        uiUpdates['outgoing_valve'] = value;
-        uiUpdates['is_wasting'] = value;
-        arduinoUpdates['output'] = value;
-        if (value) {
+
+          // Store baseline in app memory (Section 4 & Section 2)
+          try {
+            final sensorResp = await http
+                .get(Uri.parse('$_dbUrl/sensorData.json'))
+                .timeout(const Duration(seconds: 5));
+            if (sensorResp.statusCode == 200 && sensorResp.body != 'null') {
+              final sensorData = json.decode(sensorResp.body);
+              _lastOpenedFilling =
+                  (sensorData['intakeFlow'] ?? 0.0).toDouble();
+            }
+          } catch (e) {
+            debugPrint('Failed to save _lastOpenedFilling: $e');
+          }
+        } else {
+          // Turning Inlet Valve OFF:
+          // PATCH device_control: { filling_valve: false, is_filling: false }
+          // PATCH valveControl: { input: false }
           uiUpdates['filling_valve'] = false;
           uiUpdates['is_filling'] = false;
           arduinoUpdates['input'] = false;
+
+          try {
+            final responses = await Future.wait([
+              http.get(Uri.parse('$_dbUrl/sensorData.json')),
+              http.get(Uri.parse('$_dbUrl/device_control.json')),
+            ]).timeout(const Duration(seconds: 5));
+
+            final sensorResp = responses[0];
+            final deviceResp = responses[1];
+
+            if (sensorResp.statusCode == 200 && sensorResp.body != 'null') {
+              final sensorData = json.decode(sensorResp.body);
+              final deviceData =
+                  deviceResp.statusCode == 200 && deviceResp.body != 'null'
+                  ? json.decode(deviceResp.body)
+                  : {};
+
+              final double currentIntake =
+                  (sensorData['intakeFlow'] ?? 0.0).toDouble();
+              double sessionFilled = currentIntake - _lastOpenedFilling;
+
+              // Fallback if app restarted while valve was open
+              if (sessionFilled < 0 || _lastOpenedFilling == 0.0) {
+                sessionFilled = currentIntake;
+              }
+
+              final double baseLevel =
+                  (deviceData['base_tank_level'] ?? deviceData['current_level_liters'] ?? 0.0)
+                      .toDouble();
+              final double newBase = baseLevel + sessionFilled;
+
+              uiUpdates['base_tank_level'] = newBase;
+              uiUpdates['current_level_liters'] = newBase;
+
+              // POST to history/filling.json
+              final timestamp = DateTime.now().millisecondsSinceEpoch;
+              await http.post(
+                Uri.parse('$_dbUrl/history/filling.json'),
+                body: json.encode({
+                  'timestamp': timestamp,
+                  'liters_filled': sessionFilled,
+                }),
+              ).timeout(const Duration(seconds: 5));
+            }
+          } catch (e) {
+            debugPrint('Failed to record filling history: $e');
+          }
+        }
+      } else if (key == 'outgoing_valve') {
+        if (value) {
+          // Turning Outlet Valve ON:
+          // PATCH device_control: { outgoing_valve: true, is_wasting: true, filling_valve: false, is_filling: false }
+          // PATCH valveControl: { output: true, input: false }
+          uiUpdates['outgoing_valve'] = true;
+          uiUpdates['is_wasting'] = true;
+          uiUpdates['filling_valve'] = false;
+          uiUpdates['is_filling'] = false;
+          arduinoUpdates['output'] = true;
+          arduinoUpdates['input'] = false;
+
+          // Store baseline in app memory (Section 4 & Section 3)
+          try {
+            final sensorResp = await http
+                .get(Uri.parse('$_dbUrl/sensorData.json'))
+                .timeout(const Duration(seconds: 5));
+            if (sensorResp.statusCode == 200 && sensorResp.body != 'null') {
+              final sensorData = json.decode(sensorResp.body);
+              _lastOpenedUsage =
+                  (sensorData['dailyUsage'] ?? 0.0).toDouble();
+            }
+          } catch (e) {
+            debugPrint('Failed to save _lastOpenedUsage: $e');
+          }
+        } else {
+          // Turning Outlet Valve OFF:
+          // PATCH device_control: { outgoing_valve: false, is_wasting: false }
+          // PATCH valveControl: { output: false }
+          uiUpdates['outgoing_valve'] = false;
+          uiUpdates['is_wasting'] = false;
+          arduinoUpdates['output'] = false;
+
+          try {
+            final responses = await Future.wait([
+              http.get(Uri.parse('$_dbUrl/sensorData.json')),
+              http.get(Uri.parse('$_dbUrl/device_control.json')),
+            ]).timeout(const Duration(seconds: 5));
+
+            final sensorResp = responses[0];
+            final deviceResp = responses[1];
+
+            if (sensorResp.statusCode == 200 && sensorResp.body != 'null') {
+              final sensorData = json.decode(sensorResp.body);
+              final deviceData =
+                  deviceResp.statusCode == 200 && deviceResp.body != 'null'
+                  ? json.decode(deviceResp.body)
+                  : {};
+
+              final double currentOutput =
+                  (sensorData['dailyUsage'] ?? 0.0).toDouble();
+              double sessionUsage = currentOutput - _lastOpenedUsage;
+
+              // Fallback if app restarted while valve was open
+              if (sessionUsage < 0 || _lastOpenedUsage == 0.0) {
+                sessionUsage = currentOutput;
+              }
+
+              final double baseLevel =
+                  (deviceData['base_tank_level'] ?? deviceData['current_level_liters'] ?? 0.0)
+                      .toDouble();
+              double newBase = baseLevel - sessionUsage;
+              if (newBase < 0) newBase = 0.0;
+
+              uiUpdates['base_tank_level'] = newBase;
+              uiUpdates['current_level_liters'] = newBase;
+
+              // POST to history/wastage.json
+              final timestamp = DateTime.now().millisecondsSinceEpoch;
+              await http.post(
+                Uri.parse('$_dbUrl/history/wastage.json'),
+                body: json.encode({
+                  'timestamp': timestamp,
+                  'liters_wasted': sessionUsage,
+                }),
+              ).timeout(const Duration(seconds: 5));
+            }
+          } catch (e) {
+            debugPrint('Failed to record usage history: $e');
+          }
         }
       }
 
       if (uiUpdates.isNotEmpty) {
-        // Use HTTP PATCH (same as Firebase update) — works over standard HTTPS
         final futures = <Future>[
           http.patch(
             Uri.parse('$_dbUrl/device_control.json'),
@@ -405,45 +573,6 @@ class FirebaseService extends ChangeNotifier {
             body: json.encode(arduinoUpdates),
           ),
         ];
-
-        // If a valve is being turned off, log it in history by fetching current dailyUsage
-        if (value == false) {
-          try {
-            final sensorResp = await http.get(
-              Uri.parse('$_dbUrl/sensorData.json'),
-            );
-            if (sensorResp.statusCode == 200 && sensorResp.body != 'null') {
-              final sensorData = json.decode(sensorResp.body);
-              final double amount = (sensorData['dailyUsage'] ?? 0.0)
-                  .toDouble();
-
-              final timestamp = DateTime.now().millisecondsSinceEpoch;
-              if (key == 'filling_valve') {
-                futures.add(
-                  http.post(
-                    Uri.parse('$_dbUrl/history/filling.json'),
-                    body: json.encode({
-                      'timestamp': timestamp,
-                      'liters_filled': amount,
-                    }),
-                  ),
-                );
-              } else if (key == 'outgoing_valve') {
-                futures.add(
-                  http.post(
-                    Uri.parse('$_dbUrl/history/wastage.json'),
-                    body: json.encode({
-                      'timestamp': timestamp,
-                      'liters_wasted': amount,
-                    }),
-                  ),
-                );
-              }
-            }
-          } catch (e) {
-            debugPrint('Failed to log history: $e');
-          }
-        }
 
         await Future.wait(futures).timeout(const Duration(seconds: 10));
         debugPrint('REST: Updated device_control: $uiUpdates');
@@ -468,7 +597,8 @@ class FirebaseService extends ChangeNotifier {
             .put(
               Uri.parse('$_dbUrl/device_control.json'),
               body: json.encode({
-                'current_level_liters': 0,
+                'current_level_liters': 0.0,
+                'base_tank_level': 0.0,
                 'is_filling': false,
                 'is_wasting': false,
                 'filling_valve': false,

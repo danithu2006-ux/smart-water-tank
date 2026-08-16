@@ -136,27 +136,35 @@ class HistoryPage extends StatelessWidget {
                                   ],
                                 ),
                               ),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  Text(
-                                    '${amount.toStringAsFixed(1)} L',
-                                    style: TextStyle(
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.bold,
-                                      color: type == 'filling'
-                                          ? Colors.green
-                                          : Colors.orange,
-                                    ),
-                                  ),
-                                  Text(
-                                    type == 'filling' ? 'Filled' : 'Wasted',
-                                    style: const TextStyle(
-                                      fontSize: 10,
-                                      color: Colors.grey,
-                                    ),
-                                  ),
-                                ],
+                              Builder(
+                                builder: (context) {
+                                  final double displayValue = type == 'filling'
+                                      ? (amount * 1000.0) / 10.0
+                                      : (amount * 1000.0);
+
+                                  return Column(
+                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                    children: [
+                                      Text(
+                                        '${displayValue.toStringAsFixed(1)} ml',
+                                        style: TextStyle(
+                                          fontSize: 18,
+                                          fontWeight: FontWeight.bold,
+                                          color: type == 'filling'
+                                              ? Colors.green
+                                              : Colors.orange,
+                                        ),
+                                      ),
+                                      Text(
+                                        type == 'filling' ? 'Filled' : 'Usage',
+                                        style: const TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.grey,
+                                        ),
+                                      ),
+                                    ],
+                                  );
+                                },
                               ),
                             ],
                           ),

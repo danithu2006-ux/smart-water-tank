@@ -65,17 +65,22 @@ class _HomePageState extends State<HomePage>
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const CircularProgressIndicator(color: Colors.white),
+                            const CircularProgressIndicator(
+                              color: Colors.white,
+                            ),
                             const SizedBox(height: 20),
                             const Text(
                               'Connecting to Tank...',
-                              style: TextStyle(color: Colors.white, fontSize: 18),
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                              ),
                             ),
                           ],
                         ),
                       );
                     }
-                    
+
                     if (snapshot.hasError) {
                       debugPrint('STREAM ERROR: ${snapshot.error}');
                       return Center(
@@ -84,7 +89,11 @@ class _HomePageState extends State<HomePage>
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              const Icon(Icons.error_outline, color: Colors.red, size: 48),
+                              const Icon(
+                                Icons.error_outline,
+                                color: Colors.red,
+                                size: 48,
+                              ),
                               const SizedBox(height: 16),
                               Text(
                                 'Connection Error\n${snapshot.error}',
@@ -98,10 +107,13 @@ class _HomePageState extends State<HomePage>
                     }
 
                     final data = snapshot.data ?? {};
-                    final num levelNum = data['current_level_liters'] ?? 0;
-                    final int level = levelNum.toInt();
-                    // Percentage of water level. Supposing the tank is 1000 Liters, clamped between 0% and 100%.
-                    final double percent = (level / 1000).clamp(0.0, 1.0);
+                    final double level =
+                        (data['current_level_liters'] ?? 0.0).toDouble();
+                    // Tank Capacity = 10 Liters (10,000 ml)
+                    // Percentage = (liveLevel / 10) * 100 clamped 0-100%
+                    final double percent = (level / 10.0).clamp(0.0, 1.0);
+                    // Display Value (ml) = liveLevel * 1000 / 10
+                    final double displayMl = level * 1000.0 / 10.0;
 
                     return SingleChildScrollView(
                       child: Column(
@@ -183,18 +195,20 @@ class _HomePageState extends State<HomePage>
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     Text(
-                                      '$level L',
+                                      '${(percent * 100).toInt()}%',
                                       style: const TextStyle(
                                         color: Colors.white,
-                                        fontSize: 40,
+                                        fontSize: 42,
                                         fontWeight: FontWeight.bold,
                                       ),
                                     ),
+                                    const SizedBox(height: 4),
                                     Text(
-                                      '${(percent * 100).toInt()}%',
+                                      '${displayMl.toStringAsFixed(1)} ml',
                                       style: const TextStyle(
                                         color: Colors.white70,
-                                        fontSize: 20,
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w500,
                                       ),
                                     ),
                                   ],
@@ -267,7 +281,8 @@ class _HomePageState extends State<HomePage>
                         const SizedBox(height: 16),
                         _InfoCard(
                           title: 'Intake Flow',
-                          value: '${(data['intakeFlow'] ?? 0.0).toStringAsFixed(1)} L/min',
+                          value:
+                              '${(data['intakeFlow'] ?? 0.0).toStringAsFixed(1)} L/min',
                           icon: Icons.speed,
                         ),
 
@@ -323,7 +338,9 @@ class _HomePageState extends State<HomePage>
                           },
                         ),
 
-                        const SizedBox(height: 100), // bottom spacing so items aren't cut off by the navigation bar
+                        const SizedBox(
+                          height: 100,
+                        ), // bottom spacing so items aren't cut off by the navigation bar
                       ],
                     ),
                   );
@@ -509,10 +526,7 @@ class _InfoCard extends StatelessWidget {
         children: [
           Icon(icon, color: AppColors.primaryBlue),
           const SizedBox(height: 8),
-          Text(
-            title,
-            style: const TextStyle(color: Colors.grey, fontSize: 12),
-          ),
+          Text(title, style: const TextStyle(color: Colors.grey, fontSize: 12)),
           const SizedBox(height: 4),
           Text(
             value,
